@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Local SQLite + generated sample data
+data/
+sample_data/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>博物馆展品光照剂量审计</title>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<header>
+  <h1>🏛️ 博物馆展品光照剂量审计</h1>
+  <p class="subtitle">展柜照度 JSONL 上传 · 梯形积分 lux·hour · 传感器断点标记 · 换柜预测年度剂量上限</p>
+</header>
+
+<main>
+  <!-- ============ 1. 数据管理 ============ -->
+  <section class="card" id="sec-data">
+    <h2>1 · 数据管理</h2>
+    <div class="grid-2">
+      <div class="sub">
+        <h3>展柜与展品</h3>
+        <div class="row">
+          <input id="case-name" placeholder="展柜名，如 case-a">
+          <input id="case-gap" type="number" value="60" title="断点阈值（分钟）">
+          <button data-action="add-case">新建展柜</button>
+        </div>
+        <div class="row">
+          <input id="exhibit-name" placeholder="展品名，如 silk-scroll">
+          <input id="exhibit-material" placeholder="材质，如 丝织品">
+          <input id="exhibit-limit" type="number" value="50000" title="年度剂量上限 lux·h">
+          <button data-action="add-exhibit">新建展品</button>
+        </div>
+        <div class="row">
+          <label>展品：
+            <select id="exhibit-select"></select>
+          </label>
+          <button data-action="refresh" class="secondary">刷新</button>
+          <button data-action="seed" class="demo">载入示例数据（两柜 + 丝织卷轴）</button>
+        </div>
+      </div>
+      <div class="sub">
+        <h3>在柜时间段（occupancy）</h3>
+        <div class="row">
+          <select id="occ-case"></select>
+          <input id="occ-start" placeholder="开始 ISO8601，如 2026-08-01T00:00:00Z">
+          <input id="occ-end" placeholder="结束（留空=仍在柜）">
+          <button data-action="add-occ">添加在柜段</button>
+        </div>
+        <ul id="occ-list" class="occ-list"></ul>
+      </div>
+    </div>
+
+    <div class="grid-2">
+      <div class="sub">
+        <h3>上传照度 JSONL</h3>
+        <p class="hint">逐行：<code>{"ts":"2026-08-01T08:00:00Z","lux":112.4,"case":"case-a"}</code><br>
+          也可将单柜文件直接上传到指定展柜；<code>case</code> 缺省时使用下方默认展柜。</p>
+        <div class="row">
+          <input type="file" id="readings-file" accept=".jsonl,.json,text/plain">
+          <select id="upload-case" title="单柜上传目标"></select>
+        </div>
+        <div class="row">
+          <button data-action="upload-multi">多柜自动路由导入</button>
+          <button data-action="upload-single" class="secondary">上传到所选展柜</button>
+        </div>
+      </div>
+      <div class="sub">
+        <h3>上传在柜时间段 JSONL</h3>
+        <p class="hint">逐行：<code>{"exhibit":"silk-scroll","case":"case-a","start_ts":"...","end_ts":null}</code><br>
+          未知名会自动创建（新展品默认 50000 lux·h/年，可随后修改）。</p>
+        <div class="row">
+          <input type="file" id="occ-file" accept=".jsonl,.json,text/plain">
+          <button data-action="upload-occ">导入在柜段</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="cases-info" class="cases-info"></div>
+  </section>
+
+  <!-- ============ 2. 审计参数 ============ -->
+  <section class="card" id="sec-audit">
+    <h2>2 · 运行剂量审计</h2>
+    <div class="row">
+      <label>审计起点 <input id="audit-start" placeholder="留空=首个在柜段起点"></label>
+      <label>审计终点 <input id="audit-end" placeholder="留空=最新读数"></label>
+      <label>曲线步长(h) <input id="audit-step" type="number" value="1" min="0.1" max="24" step="0.5"></label>
+      <button data-action="run-audit" class="primary">计算累计剂量</button>
+      <button data-action="export" class="secondary">导出审计 JSON</button>
+    </div>
+    <div id="totals" class="totals"></div>
+  </section>
+
+  <!-- ============ 3. 并列视图 ============ -->
+  <section class="card" id="sec-results">
+    <h2>3 · 剂量曲线 · 断点证据 · 轮换对比</h2>
+    <div class="panels">
+      <div class="panel">
+        <h3>累计剂量曲线（lux·hour）</h3>
+        <canvas id="chart-dose" height="260"></canvas>
+        <div id="bycase" class="bycase"></div>
+      </div>
+      <div class="panel">
+        <h3>断点证据</h3>
+        <div class="legend"><span class="dot bp"></span> 跨断点梯形区间（读数间隔超阈值）
+          <span class="dot gap"></span> 在柜但无读数覆盖</div>
+        <canvas id="chart-evidence" height="260"></canvas>
+        <div id="evidence-list" class="evidence"></div>
+      </div>
+    </div>
+
+    <div class="sub sim-box">
+      <h3>轮换模拟：移入另一展柜</h3>
+      <div class="row">
+        <label>目标展柜 <select id="target-case"></select></label>
+        <label>换柜时间 <input id="move-ts" placeholder="留空=最新读数时刻"></label>
+        <label>年度窗口起点 <input id="annual-start" placeholder="留空=本年 1 月 1 日（UTC）"></label>
+        <button data-action="simulate" class="primary">预测达到年度上限日期</button>
+      </div>
+      <div class="panels">
+        <div class="panel">
+          <h4>轮换前后对比（预测曲线）</h4>
+          <canvas id="chart-sim" height="280"></canvas>
+        </div>
+        <div class="panel">
+          <h4>预测结果</h4>
+          <div id="sim-result" class="sim-result"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <span>本地运行 · 数据存于容器内 SQLite · 不依赖任何第三方账号 · 时间均为 UTC</span>
+</footer>
+
+<div id="toast" class="toast hidden"></div>
+<script src="/app.js"></script>
+</body>
+</html>

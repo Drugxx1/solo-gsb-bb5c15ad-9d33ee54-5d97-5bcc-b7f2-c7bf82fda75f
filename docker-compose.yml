@@ -1,0 +1,19 @@
+services:
+  light-audit:
+    build: .
+    image: museum-light-audit:latest
+    container_name: museum-light-audit
+    # 默认仅绑定本机回环地址；如需局域网访问，改为 "8000:8000"（对应 0.0.0.0）
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - light-audit-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  light-audit-data:
