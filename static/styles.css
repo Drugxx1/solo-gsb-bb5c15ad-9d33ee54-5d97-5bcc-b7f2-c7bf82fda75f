@@ -138,6 +138,35 @@ footer { text-align: center; color: var(--muted); font-size: 12px; padding: 18px
 }
 .toast.err { background: #7a1f16; }
 .hidden { display: none; }
+
+/* ---- 轮换排期（rotation scheduling） ---- */
+.tbl { border-collapse: collapse; width: 100%; font-size: 12px; margin: 6px 0; }
+.tbl th, .tbl td { border-bottom: 1px solid var(--line); padding: 4px 6px; text-align: left; vertical-align: top; }
+.tbl th { color: var(--muted); font-weight: 500; background: #faf3e6; }
+.chain, .block {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin: 10px 0;
+  background: #fff;
+}
+.chain { border-left: 4px solid var(--bp); }
+.block { border-left: 4px solid var(--accent2); }
+.block.over { border-left-color: var(--bp); background: #fff8f6; }
+.chain h4, .block h4 { color: var(--ink); margin-bottom: 6px; }
+.stag { display: inline-block; border-radius: 10px; padding: 1px 8px; font-size: 11px; }
+.st-draft { background: #efe7d8; color: var(--muted); }
+.st-ok { background: #dceee6; color: var(--accent2); }
+.st-rev { background: #f6dcd8; color: var(--bp); }
+.rot-row select, .rot-row input { min-width: 0; }
+.rot-row .rot-start, .rot-row .rot-end { width: 200px; }
+.rot-row .rot-note { width: 110px; }
+.rot-cap-input { width: 64px; min-width: 64px; }
+.rot-batches { font-size: 12px; }
+.rot-batch-row { justify-content: space-between; border-bottom: 1px dotted var(--line); padding: 6px 2px; }
+.rot-ops button { padding: 3px 10px; font-size: 12px; margin-right: 4px; }
+button[disabled] { opacity: .45; cursor: not-allowed; }
+.vrow { border-bottom: 1px dotted var(--line); padding: 4px 0; }
 @media (max-width: 900px) {
   .grid-2, .panels { grid-template-columns: 1fr; }
 }

@@ -202,6 +202,9 @@ async function loadAll() {
   renderSelects();
   renderCasesInfo();
   await renderOccupancies();
+  rotRenderCapacityInputs();
+  rotRefreshRows();
+  await rotLoadBatches();
 }
 
 function renderSelects() {
@@ -538,6 +541,31 @@ document.addEventListener("click", async (ev) => {
       a.href = url; a.download = "light_audit.json"; a.click();
       URL.revokeObjectURL(url);
       toast("审计 JSON 已导出（含 SHA-256 校验和）");
+    } else if (act === "rot-add-row") {
+      rotAddRow();
+    } else if (act === "rot-row-del") {
+      const row = btn.closest(".rot-row");
+      if (row) row.remove();
+      if (!$$("#rot-draft-rows .rot-row").length) rotAddRow();
+    } else if (act === "rot-submit") {
+      await rotSubmit();
+    } else if (act === "rot-refresh-batches") {
+      await rotLoadBatches();
+      toast("批次列表已刷新");
+    } else if (act === "rot-load") {
+      await rotLoadBatch(Number(btn.getAttribute("data-batch")));
+    } else if (act === "rot-accept" || act === "rot-revoke") {
+      const draftId = btn.getAttribute("data-draft");
+      const action = act === "rot-accept" ? "accept" : "revoke";
+      const r = await api(`/api/rotation/drafts/${draftId}/${action}`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ note: "" }),
+      });
+      toast(`草案 #${draftId} 已${action === "accept" ? "接受" : "撤销"}（v${r.version}）`);
+      if (rotState.batchId) await rotLoadBatch(rotState.batchId, { scroll: false });
+      await rotLoadBatches();
+    } else if (act === "rot-versions") {
+      await rotShowVersions(Number(btn.getAttribute("data-draft")));
     }
   } catch (err) {
     toast("错误：" + err.message, true);
@@ -548,5 +576,215 @@ window.addEventListener("resize", () => {
   if (state.audit) { renderDoseChart(state.audit); renderEvidence(state.audit); }
   if (state.simulation) renderSimulation(state.simulation);
 });
+
+// ---------------------------------------------------------------------------
+// 4 · 轮换排期（rotation scheduling）
+// ---------------------------------------------------------------------------
+
+const rotState = { batchId: null, detail: null };
+
+const ROT_CONFLICT_NAMES = {
+  exhibit_double_booked: "同一展品多柜冲突",
+  case_over_capacity: "展柜超容",
+};
+const ROT_NOTE_NAMES = {
+  measured: "实测积分",
+  "measured+extrapolated": "实测＋历史均值外推",
+  extrapolated_from_case_history: "历史均值外推",
+  uncovered_not_estimable: "无读数且无法外推",
+  no_readings: "展柜无读数",
+};
+
+function rotStatusTag(s) {
+  const map = { draft: ["草案", "st-draft"], accepted: ["已接受", "st-ok"], revoked: ["已撤销", "st-rev"] };
+  const [label, cls] = map[s] || [s, "st-draft"];
+  return `<span class="stag ${cls}">${label}</span>`;
+}
+
+function rotRenderCapacityInputs() {
+  const box = $("#rot-capacities");
+  if (!state.cases.length) { box.innerHTML = '<span class="hint">（请先创建展柜）</span>'; return; }
+  box.innerHTML = state.cases.map((c) =>
+    `<label>${c.name} <input type="number" min="1" max="99" value="1" data-rot-cap="${c.id}" class="rot-cap-input"></label>`).join("");
+}
+
+function rotRowHtml() {
+  const exOpts = state.exhibits.map((e) => `<option value="${e.id}">${e.name}</option>`).join("");
+  const caseOpts = state.cases.map((c) => `<option value="${c.id}">${c.name}</option>`).join("");
+  return `<div class="row rot-row">
+    <select class="rot-ex" title="展品">${exOpts}</select>
+    <select class="rot-case" title="展柜">${caseOpts}</select>
+    <input class="rot-start" placeholder="开始 ISO8601，如 2026-10-01T00:00:00Z">
+    <input class="rot-end" placeholder="结束（留空=开放段）">
+    <input class="rot-note" placeholder="备注">
+    <button data-action="rot-row-del" class="secondary" title="删除此行">✕</button>
+  </div>`;
+}
+
+function rotAddRow() {
+  $("#rot-draft-rows").insertAdjacentHTML("beforeend", rotRowHtml());
+}
+
+function rotRefreshRows() {
+  if (!$$("#rot-draft-rows .rot-row").length) rotAddRow();
+  $$("#rot-draft-rows .rot-row").forEach((row) => {
+    const exSel = row.querySelector(".rot-ex");
+    const caseSel = row.querySelector(".rot-case");
+    const exV = exSel.value, caseV = caseSel.value;
+    exSel.innerHTML = state.exhibits.map((e) => `<option value="${e.id}">${e.name}</option>`).join("");
+    caseSel.innerHTML = state.cases.map((c) => `<option value="${c.id}">${c.name}</option>`).join("");
+    if (exV) exSel.value = exV;
+    if (caseV) caseSel.value = caseV;
+  });
+}
+
+async function rotSubmit() {
+  if (!state.exhibits.length || !state.cases.length) throw new Error("请先创建展品与展柜");
+  const name = $("#rot-name").value.trim() || `排期批次 ${new Date().toISOString().slice(0, 16).replace("T", " ")}`;
+  const capacities = $$("[data-rot-cap]").map((inp) => ({
+    case_id: Number(inp.getAttribute("data-rot-cap")), capacity: Number(inp.value) || 1,
+  }));
+  const rows = $$("#rot-draft-rows .rot-row");
+  if (!rows.length) throw new Error("请至少添加一条草案");
+  const drafts = rows.map((row, i) => {
+    const start = row.querySelector(".rot-start").value.trim();
+    if (!start) throw new Error(`第 ${i + 1} 行草案缺少开始时间`);
+    return {
+      exhibit_id: Number(row.querySelector(".rot-ex").value),
+      case_id: Number(row.querySelector(".rot-case").value),
+      start_ts: start,
+      end_ts: row.querySelector(".rot-end").value.trim() || null,
+      note: row.querySelector(".rot-note").value.trim(),
+    };
+  });
+  const detail = await api("/api/rotation/batches", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      name, note: "",
+      annual_start: $("#rot-annual-start").value.trim() || null,
+      capacities, drafts,
+    }),
+  });
+  rotState.batchId = detail.batch.id;
+  rotRender(detail);
+  $("#rot-draft-rows").innerHTML = "";
+  rotAddRow();
+  await rotLoadBatches();
+  const a = detail.analysis;
+  toast(`批次 #${detail.batch.id} 已创建：${a.conflict_chains.length} 条冲突链，` +
+    `${a.over_limit_plans.length} 件展品超限`);
+}
+
+async function rotLoadBatches() {
+  const list = await api("/api/rotation/batches");
+  const box = $("#rot-batch-list");
+  if (!list.length) { box.innerHTML = '<p class="hint">暂无排期批次</p>'; return; }
+  box.innerHTML = list.map((b) => `<div class="row rot-batch-row">
+    <span><b>#${b.id} ${b.name}</b><br>
+    <span class="hint">${fmtDate(b.created_at)} · 草案 ${b.draft_count}（接受 ${b.accepted_count} / 撤销 ${b.revoked_count}）</span></span>
+    <button data-action="rot-load" data-batch="${b.id}" class="secondary">载入分析</button>
+  </div>`).join("");
+}
+
+async function rotLoadBatch(id, opts = {}) {
+  const detail = await api(`/api/rotation/batches/${id}`);
+  rotState.batchId = id;
+  rotRender(detail);
+  if (opts.scroll !== false) $("#rot-result").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function rotRender(detail) {
+  rotState.detail = detail;
+  $("#rot-result").classList.remove("hidden");
+  const a = detail.analysis;
+  $("#rot-summary").innerHTML = `
+    <div class="metric ${a.conflict_chains.length ? "warn" : ""}"><div class="v">${a.conflict_chains.length}</div><div class="k">冲突链</div></div>
+    <div class="metric"><div class="v">${a.involved_exhibits.length}</div><div class="k">涉及展品</div></div>
+    <div class="metric ${a.over_limit_plans.length ? "warn" : ""}"><div class="v">${a.over_limit_plans.length}</div><div class="k">超限计划</div></div>
+    <div class="metric"><div class="v">${detail.drafts.length}</div><div class="k">草案总数</div></div>
+    <div class="metric"><div class="v" style="font-size:14px">${fmtDate(a.annual_window.start_ts).slice(0, 10)}<br>${fmtDate(a.annual_window.end_ts).slice(0, 10)}</div><div class="k">年度窗口（UTC）</div></div>`;
+  rotRenderChains(a);
+  rotRenderPlans(a);
+  rotRenderDrafts(detail);
+  $("#rot-versions").innerHTML = "";
+}
+
+function rotRenderChains(a) {
+  const box = $("#rot-chains");
+  let html = "";
+  if (a.outside_annual_window.length) {
+    html += `<p class="hint">⚠️ ${a.outside_annual_window.length} 条草案在年度窗口之外，未参与扫描：${a.outside_annual_window.map((d) => "#" + d.draft_id).join("、")}</p>`;
+  }
+  if (!a.conflict_chains.length) {
+    box.innerHTML = html + '<p class="hint">✅ 未发现同一展品多柜冲突或展柜超容。</p>';
+    return;
+  }
+  box.innerHTML = html + a.conflict_chains.map((ch) => {
+    const periods = ch.periods.map((p) => `<tr>
+      <td class="tag-bp">${ROT_CONFLICT_NAMES[p.type] || p.type}</td>
+      <td>${fmtDate(p.start_ts)}<br>${fmtDate(p.end_ts)}</td>
+      <td>${p.type === "case_over_capacity"
+        ? `${p.case_name}：同时在柜 ${p.active} 件 / 容量 ${p.capacity}`
+        : `展品 ${p.exhibit_name}（${p.active} 段重叠）`}</td></tr>`).join("");
+    const drafts = ch.drafts.map((d) => `<tr>
+      <td>#${d.draft_id}</td><td>${d.exhibit_name}</td><td>${d.case_name}</td>
+      <td>${fmtDate(d.start_ts)}</td><td>${d.open_ended ? "开放段" : fmtDate(d.end_ts)}</td>
+      <td>${rotStatusTag(d.status)}</td></tr>`).join("");
+    const exChips = ch.exhibits.map((e) => `<span class="chip">🏺 ${e.name}</span>`).join("");
+    const caseChips = ch.cases.map((c) => `<span class="chip">🗄️ ${c.name}</span>`).join("");
+    return `<div class="chain">
+      <h4>冲突链 #${ch.chain_no} · 始于 ${fmtDate(ch.start_ts)} · ${ch.types.map((t) => ROT_CONFLICT_NAMES[t]).join("＋")}</h4>
+      <div class="row">${exChips}${caseChips}</div>
+      <table class="tbl"><thead><tr><th>冲突类型</th><th>区间 (UTC)</th><th>详情</th></tr></thead><tbody>${periods}</tbody></table>
+      <table class="tbl"><thead><tr><th>草案</th><th>展品</th><th>展柜</th><th>开始</th><th>结束</th><th>状态</th></tr></thead><tbody>${drafts}</tbody></table>
+    </div>`;
+  }).join("");
+}
+
+function rotRenderPlans(a) {
+  const box = $("#rot-plans");
+  if (!a.exhibit_plans.length) { box.innerHTML = '<p class="hint">批次内没有生效中的草案（已撤销的草案不参与估算）。</p>'; return; }
+  box.innerHTML = a.exhibit_plans.map((p) => {
+    const segs = p.segments.map((s) => `<tr>
+      <td>#${s.draft_id}</td><td>${s.case_name}</td>
+      <td>${fmtDate(s.start_ts)}<br>${s.open_ended ? "开放段→" : ""}${fmtDate(s.end_ts)}</td>
+      <td>${fmt(s.measured_lux_hours)}</td><td>${fmt(s.estimated_lux_hours)}</td>
+      <td><b>${fmt(s.dose_lux_hours)}</b></td>
+      <td>${ROT_NOTE_NAMES[s.estimate_note] || s.estimate_note}</td></tr>`).join("");
+    return `<div class="block ${p.exceeds_limit ? "over" : ""}">
+      <h4>${p.exhibit_name} ${p.exceeds_limit ? '<span class="flag">超出年度上限</span>' : ""}</h4>
+      <div class="totals">
+        <div class="metric"><div class="v">${fmt(p.baseline_lux_hours)}</div><div class="k">既有在柜剂量 lux·h</div></div>
+        <div class="metric"><div class="v">${fmt(p.planned_lux_hours)}</div><div class="k">本批计划剂量 lux·h</div></div>
+        <div class="metric ${p.exceeds_limit ? "warn" : ""}"><div class="v">${fmt(p.total_lux_hours)}</div>
+          <div class="k">合计 / 上限 ${fmt(p.annual_limit_lux_hours, 0)} lux·h${p.exceeds_limit ? `（超 ${fmt(p.excess_lux_hours)}）` : ""}</div></div>
+      </div>
+      <table class="tbl"><thead><tr><th>草案</th><th>展柜</th><th>区间 (UTC)</th><th>实测 lux·h</th><th>外推 lux·h</th><th>合计</th><th>估算方式</th></tr></thead>
+      <tbody>${segs}</tbody></table>
+    </div>`;
+  }).join("");
+}
+
+function rotRenderDrafts(detail) {
+  const rows = detail.drafts.map((d) => `<tr>
+    <td>#${d.id}</td><td>${d.exhibit_name}</td><td>${d.case_name}</td>
+    <td>${fmtDate(d.start_ts)}</td><td>${d.end_ts ? fmtDate(d.end_ts) : "开放段"}</td>
+    <td>${rotStatusTag(d.status)} <span class="hint">v${d.version}</span></td>
+    <td class="rot-ops">
+      <button data-action="rot-accept" data-draft="${d.id}" ${d.status === "accepted" ? "disabled" : ""}>接受</button>
+      <button data-action="rot-revoke" data-draft="${d.id}" class="secondary" ${d.status === "revoked" ? "disabled" : ""}>撤销</button>
+      <button data-action="rot-versions" data-draft="${d.id}" class="secondary">版本</button>
+    </td></tr>`).join("");
+  $("#rot-drafts").innerHTML =
+    `<table class="tbl"><thead><tr><th>草案</th><th>展品</th><th>展柜</th><th>开始</th><th>结束</th><th>状态</th><th>操作</th></tr></thead>
+     <tbody>${rows}</tbody></table>`;
+}
+
+async function rotShowVersions(draftId) {
+  const vs = await api(`/api/rotation/drafts/${draftId}/versions`);
+  $("#rot-versions").innerHTML = `<h4>草案 #${draftId} 版本历史</h4>` + vs.map((v) =>
+    `<div class="row vrow"><span class="chip">v${v.version}</span> ${rotStatusTag(v.status)}` +
+    `<span class="hint">${fmtDate(v.created_at)}${v.note ? " · " + v.note : ""}</span></div>`).join("");
+}
 
 loadAll().catch((e) => toast("初始化失败：" + e.message, true));

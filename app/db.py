@@ -55,6 +55,55 @@ CREATE TABLE IF NOT EXISTS occupancies (
     CHECK (end_ts IS NULL OR end_ts > start_ts)
 );
 CREATE INDEX IF NOT EXISTS idx_occ_exhibit ON occupancies(exhibit_id, start_ts);
+
+-- ---------------------------------------------------------------------------
+-- Rotation scheduling: one batch = one submission of multi-exhibit draft
+-- plans + per-case capacities. Drafts accept/revoke transitions are versioned.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS rotation_batches (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    name         TEXT NOT NULL,
+    note         TEXT NOT NULL DEFAULT '',
+    annual_start TEXT,  -- NULL => Jan 1 (UTC) of the earliest draft's year
+    created_at   TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS rotation_case_capacities (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id INTEGER NOT NULL REFERENCES rotation_batches(id) ON DELETE CASCADE,
+    case_id  INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+    capacity INTEGER NOT NULL CHECK (capacity >= 1),
+    UNIQUE(batch_id, case_id)
+);
+
+CREATE TABLE IF NOT EXISTS rotation_drafts (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id   INTEGER NOT NULL REFERENCES rotation_batches(id) ON DELETE CASCADE,
+    exhibit_id INTEGER NOT NULL REFERENCES exhibits(id) ON DELETE CASCADE,
+    case_id    INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+    start_ts   TEXT NOT NULL,
+    end_ts     TEXT,  -- NULL = open ended (clamped to the annual window in analysis)
+    note       TEXT NOT NULL DEFAULT '',
+    status     TEXT NOT NULL DEFAULT 'draft'
+               CHECK (status IN ('draft', 'accepted', 'revoked')),
+    version    INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    CHECK (end_ts IS NULL OR end_ts > start_ts)
+);
+CREATE INDEX IF NOT EXISTS idx_rotation_drafts_batch ON rotation_drafts(batch_id, start_ts);
+
+-- Every status transition is appended here; rotation_drafts.version is the
+-- current version number, so the full accept/revoke history is preserved.
+CREATE TABLE IF NOT EXISTS rotation_draft_versions (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    draft_id   INTEGER NOT NULL REFERENCES rotation_drafts(id) ON DELETE CASCADE,
+    version    INTEGER NOT NULL,
+    status     TEXT NOT NULL,
+    note       TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    UNIQUE(draft_id, version)
+);
 """
 
 

@@ -3,11 +3,13 @@
 基于 **Python FastAPI + SQLite + 原生前端（HTML/CSS/Canvas，无 JS 框架）**
 构建的展柜光照剂量审计工具。按相邻照度读数做**梯形积分**累计
 `lux·hour`，明确标记跨传感器断点的剂量区间；模拟把展品**移入另一展柜**后，
-依据两柜历史照度曲线**预测达到年度剂量上限的日期**。
+依据两柜历史照度曲线**预测达到年度剂量上限的日期**；并支持一次提交
+多件展品的**轮换排期草案**：按半开区间扫描同柜超容与同一展品多柜冲突，
+结合照度曲线估算每段年度剂量，逐条接受/撤销并保留版本。
 
 - 默认只监听 `127.0.0.1`，本机访问，不依赖任何第三方账号或外部服务
 - 数据存储于本地 SQLite（Docker volume）
-- 页面并列显示：**累计剂量曲线**、**断点证据**、**轮换前后对比**
+- 页面并列显示：**累计剂量曲线**、**断点证据**、**轮换前后对比**、**轮换排期冲突链**
 - 一键导出完整审计 JSON（含 SHA-256 校验和）
 
 ## 一条命令启动
@@ -42,6 +44,9 @@ compose 的端口行改成 `"8000:8000"` 后重新 `docker compose up -d`。
 3. 在「轮换模拟」中目标展柜选 `case-b`，点击
    **「预测达到年度上限日期」**：对比留柜 / 换柜的预测触限日期
 4. 点击 **「导出审计 JSON」** 下载完整审计包
+5. 在第 4 区「轮换排期」中添加几行草案（如 silk-scroll → case-b，
+   2026-10-01 → 2026-12-01），点击 **「提交批次并分析」**：
+   查看冲突链、每段年度剂量估算，并对草案逐条「接受 / 撤销」
 
 ## 剂量计算方法
 
@@ -65,6 +70,34 @@ compose 的端口行改成 `"8000:8000"` 后重新 `docker compose up -d`。
 - 输出剩余预算、剂量速率、预计达到年度上限的日期；
   若预测日期**越过年度重置点**会明确打标
 - 换柜时刻（默认 `as_of`）之后把在柜关系切换到目标展柜
+
+## 轮换排期（计划草案）
+
+一次 `POST /api/rotation/batches` 提交一个**批次**：多件展品的在柜计划草案
++ 各展柜容量（同时在柜展品数上限，未列出的展柜默认 1）。
+
+- **半开区间扫描**：所有草案按 `[start, end)` 处理——一条草案在 T 结束、
+  另一条在 T 开始**不算**重叠；`end_ts` 为 `null` 的开放段在分析时按
+  年度窗口末端截断。草案先裁剪到年度窗口（默认：最早草案所在年的
+  1 月 1 日 UTC 起 365 天，可用 `annual_start` 覆盖），完全落在窗口外的
+  草案单独列出、不参与扫描
+- **两类冲突**：
+  - `exhibit_double_booked`：同一展品同一时段出现在多处（两个展柜或同柜两段）
+  - `case_over_capacity`：同一展柜同时生效的草案数超过其容量
+- **冲突链**：被冲突区间直接或间接相连的草案构成一条链（连通分量），
+  链与链内草案均**按开始时间稳定排序**；输出每条链的冲突区间、涉及展品
+  与涉及展柜
+- **每段年度剂量**：有读数覆盖的部分用梯形积分实测；无覆盖部分按该柜
+  历史平均照度（`ambient_rates`）外推。每件展品的
+  `既有在柜剂量（真实 occupancy）+ 本批计划剂量` 与其年度上限比较，
+  输出**超出年度上限的计划**（同样按开始时间排序）
+- **逐条接受 / 撤销并保留版本**：草案状态机
+  `draft → accepted / revoked`，每次变迁版本号 +1 并追加到
+  `rotation_draft_versions`，历史可随时查询；只有 `draft` 与 `accepted`
+  状态的草案参与冲突扫描与剂量估算，撤销后立即从分析中移除
+- 新表（`rotation_batches`、`rotation_case_capacities`、`rotation_drafts`、
+  `rotation_draft_versions`）随 `docker compose up --build` 启动时由
+  `init_db()` 自动创建（`CREATE TABLE IF NOT EXISTS`，对已有数据卷安全）
 
 ## 数据上传格式
 
@@ -112,6 +145,12 @@ compose 的端口行改成 `"8000:8000"` 后重新 `docker compose up -d`。
 | POST/GET | `/api/audit` | 审计：总量、分柜量、断点证据、覆盖缺口、累计曲线 |
 | POST/GET | `/api/simulate` | 换柜预测（`exhibit_id`、`target_case_id`、可选 `move_ts`、`annual_start`、`as_of`） |
 | POST | `/api/audit/export?exhibit_id=...[&simulate_target_case_id=...]` | 导出审计 JSON（含 `checksum_sha256`） |
+| POST | `/api/rotation/batches` | 提交排期批次（容量 + 多展品草案），返回冲突链与剂量分析 |
+| GET  | `/api/rotation/batches` | 批次列表（含草案状态统计） |
+| GET  | `/api/rotation/batches/{id}` | 批次详情 + 实时分析（反映当前草案状态） |
+| POST | `/api/rotation/drafts/{id}/accept` | 接受草案（版本 +1） |
+| POST | `/api/rotation/drafts/{id}/revoke` | 撤销草案（版本 +1） |
+| GET  | `/api/rotation/drafts/{id}/versions` | 草案版本历史 |
 | POST | `/api/admin/seed` | 生成并导入示例数据（已有数据时需 `overwrite=true`） |
 | GET  | `/health` | 健康检查 |
 
@@ -131,6 +170,20 @@ curl "http://localhost:8000/api/simulate?exhibit_id=1&target_case_id=2" | python
 
 # 导出含模拟结果的审计包
 curl -X POST "http://localhost:8000/api/audit/export?exhibit_id=1&simulate_target_case_id=2" -o audit.json
+
+# 提交轮换排期批次（容量 + 多展品草案）
+curl -X POST http://localhost:8000/api/rotation/batches \
+  -H 'Content-Type: application/json' -d '{
+    "name": "2026Q4 轮换",
+    "capacities": [{"case_id": 1, "capacity": 1}, {"case_id": 2, "capacity": 1}],
+    "drafts": [
+      {"exhibit_id": 1, "case_id": 2, "start_ts": "2026-10-01T00:00:00Z", "end_ts": "2026-12-01T00:00:00Z"},
+      {"exhibit_id": 1, "case_id": 1, "start_ts": "2026-12-01T00:00:00Z", "end_ts": null}
+    ]}' | python3 -m json.tool
+
+# 逐条接受 / 撤销草案（版本留痕）
+curl -X POST http://localhost:8000/api/rotation/drafts/1/accept
+curl http://localhost:8000/api/rotation/drafts/1/versions | python3 -m json.tool
 ```
 
 ## 导出的审计 JSON 结构（节选）
@@ -169,14 +222,18 @@ curl -X POST "http://localhost:8000/api/audit/export?exhibit_id=1&simulate_targe
 ```
 .
 ├── app/
-│   ├── main.py        # FastAPI 路由、JSONL 上传、审计/模拟/导出
+│   ├── main.py        # FastAPI 路由、JSONL 上传、审计/模拟/导出、轮换排期
 │   ├── audit.py       # 梯形积分、断点标记、累计曲线、换柜预测
-│   ├── db.py          # SQLite 连接与表结构
+│   ├── rotation.py    # 半开区间冲突扫描、冲突链、分段年度剂量估算、草案版本
+│   ├── db.py          # SQLite 连接与表结构（含轮换排期 4 张表）
 │   └── seed.py        # 确定性示例数据（含一次传感器断电）
 ├── static/
 │   ├── index.html     # 单页界面
 │   ├── styles.css
 │   └── app.js         # 原生 JS + Canvas 2D 自绘图表
+├── tests/
+│   ├── test_audit.py  # 剂量数学单元测试
+│   └── test_rotation.py  # 轮换排期：冲突扫描/剂量估算/版本生命周期
 ├── sample_data/       # 由 /api/admin/seed 生成
 ├── Dockerfile
 ├── docker-compose.yml

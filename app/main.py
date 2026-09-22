@@ -17,7 +17,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import audit, db, seed as seed_mod
+from . import audit, db, rotation, seed as seed_mod
 
 
 @asynccontextmanager
@@ -26,7 +26,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="博物馆展品光照剂量审计", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="博物馆展品光照剂量审计", version="1.1.0", lifespan=lifespan)
 
 
 # ---------------------------------------------------------------------------
@@ -66,6 +66,31 @@ class SimulateIn(BaseModel):
     move_ts: Optional[str] = None
     annual_start: Optional[str] = None  # default: Jan 1 of the as_of year
     as_of: Optional[str] = None        # default: latest reading timestamp
+
+
+class RotationCapacityIn(BaseModel):
+    case_id: int
+    capacity: int = Field(ge=1, le=99)
+
+
+class RotationDraftIn(BaseModel):
+    exhibit_id: int
+    case_id: int
+    start_ts: str
+    end_ts: Optional[str] = None  # null = open ended (clamped to annual window)
+    note: str = ""
+
+
+class RotationBatchIn(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    note: str = ""
+    annual_start: Optional[str] = None  # default: Jan 1 of earliest draft's year
+    capacities: list[RotationCapacityIn] = Field(default_factory=list)
+    drafts: list[RotationDraftIn] = Field(min_length=1)
+
+
+class DraftActionIn(BaseModel):
+    note: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -391,6 +416,90 @@ async def import_occupancies_jsonl(
             inserted.append({"id": cur.lastrowid, "exhibit": ename, "case": cname})
 
     return {"inserted": len(inserted), "occupancies": inserted, "filename": file.filename}
+
+
+# ---------------------------------------------------------------------------
+# Rotation scheduling (multi-exhibit draft plans)
+# ---------------------------------------------------------------------------
+
+@app.post("/api/rotation/batches", status_code=201)
+def create_rotation_batch(body: RotationBatchIn):
+    """Submit one batch: per-case capacities + multiple exhibits' draft plans.
+
+    The batch is stored (drafts at version 1, status ``draft``) and the
+    conflict/dose analysis is returned immediately.
+    """
+    annual_start = _parse_ts_or_400(body.annual_start, "annual_start")
+    drafts: list[dict] = []
+    for i, d in enumerate(body.drafts, 1):
+        s = _parse_ts_or_400(d.start_ts, f"drafts[{i}].start_ts")
+        e = _parse_ts_or_400(d.end_ts, f"drafts[{i}].end_ts")
+        if s is None:
+            raise HTTPException(400, f"第 {i} 条草案缺少 start_ts")
+        if e and e <= s:
+            raise HTTPException(400, f"第 {i} 条草案 end_ts 必须晚于 start_ts")
+        drafts.append({"exhibit_id": d.exhibit_id, "case_id": d.case_id,
+                       "start": s, "end": e, "note": d.note})
+    with db.get_conn() as conn:
+        for d in body.drafts:
+            _row_or_404(conn, "exhibits", d.exhibit_id)
+            _row_or_404(conn, "cases", d.case_id)
+        seen: set[int] = set()
+        for c in body.capacities:
+            _row_or_404(conn, "cases", c.case_id)
+            if c.case_id in seen:
+                raise HTTPException(400, f"展柜 #{c.case_id} 的容量重复设置")
+            seen.add(c.case_id)
+        batch_id = rotation.create_batch(
+            conn, name=body.name, note=body.note, annual_start=annual_start,
+            capacities=[c.model_dump() for c in body.capacities], drafts=drafts)
+        return rotation.batch_payload(conn, batch_id)
+
+
+@app.get("/api/rotation/batches")
+def list_rotation_batches():
+    with db.get_conn() as conn:
+        return rotation.list_batches(conn)
+
+
+@app.get("/api/rotation/batches/{batch_id}")
+def get_rotation_batch(batch_id: int):
+    """Batch detail + fresh analysis (reflects current draft statuses)."""
+    with db.get_conn() as conn:
+        try:
+            return rotation.batch_payload(conn, batch_id)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+
+def _rotation_draft_action(draft_id: int, status: str, body: Optional[DraftActionIn]):
+    with db.get_conn() as conn:
+        try:
+            return rotation.set_draft_status(
+                conn, draft_id, status, (body.note if body else ""))
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/api/rotation/drafts/{draft_id}/accept")
+def accept_rotation_draft(draft_id: int, body: Optional[DraftActionIn] = None):
+    return _rotation_draft_action(draft_id, "accepted", body)
+
+
+@app.post("/api/rotation/drafts/{draft_id}/revoke")
+def revoke_rotation_draft(draft_id: int, body: Optional[DraftActionIn] = None):
+    return _rotation_draft_action(draft_id, "revoked", body)
+
+
+@app.get("/api/rotation/drafts/{draft_id}/versions")
+def rotation_draft_versions(draft_id: int):
+    with db.get_conn() as conn:
+        try:
+            return rotation.list_draft_versions(conn, draft_id)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
 
 
 # ---------------------------------------------------------------------------

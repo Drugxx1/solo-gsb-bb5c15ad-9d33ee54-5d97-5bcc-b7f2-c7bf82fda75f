@@ -9,7 +9,7 @@
 <body>
 <header>
   <h1>🏛️ 博物馆展品光照剂量审计</h1>
-  <p class="subtitle">展柜照度 JSONL 上传 · 梯形积分 lux·hour · 传感器断点标记 · 换柜预测年度剂量上限</p>
+  <p class="subtitle">展柜照度 JSONL 上传 · 梯形积分 lux·hour · 传感器断点标记 · 换柜预测年度剂量上限 · 轮换排期冲突扫描</p>
 </header>
 
 <main>
@@ -126,6 +126,55 @@
           <h4>预测结果</h4>
           <div id="sim-result" class="sim-result"></div>
         </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 4. 轮换排期 ============ -->
+  <section class="card" id="sec-rotation">
+    <h2>4 · 轮换排期（多展品计划草案）</h2>
+    <div class="grid-2">
+      <div class="sub">
+        <h3>新建排期批次</h3>
+        <p class="hint">一次提交多件展品的在柜计划草案与各展柜容量（同时在柜件数上限）。<br>
+          按半开区间 <code>[start, end)</code> 扫描：同一展品多柜冲突、同柜超容；
+          结束时间留空表示开放段（分析时按年度窗口末端截断）。</p>
+        <div class="row">
+          <input id="rot-name" placeholder="批次名，如 2026Q4 轮换">
+          <input id="rot-annual-start" placeholder="年度窗口起点（留空=最早草案所在年 1/1）">
+        </div>
+        <h4>展柜容量（同时在柜展品数）</h4>
+        <div id="rot-capacities" class="row"></div>
+        <h4>计划草案（展品 → 展柜 → 起止时间）</h4>
+        <div id="rot-draft-rows"></div>
+        <div class="row">
+          <button data-action="rot-add-row" class="secondary">＋添加草案行</button>
+          <button data-action="rot-submit" class="primary">提交批次并分析</button>
+        </div>
+      </div>
+      <div class="sub">
+        <h3>已有批次</h3>
+        <div class="row"><button data-action="rot-refresh-batches" class="secondary">刷新批次列表</button></div>
+        <div id="rot-batch-list" class="rot-batches"></div>
+      </div>
+    </div>
+
+    <div id="rot-result" class="hidden">
+      <div id="rot-summary" class="totals"></div>
+      <div class="panels">
+        <div class="panel">
+          <h3>冲突链（按开始时间稳定排序）</h3>
+          <div id="rot-chains"></div>
+        </div>
+        <div class="panel">
+          <h3>年度剂量估算 · 超出年度上限的计划</h3>
+          <div id="rot-plans"></div>
+        </div>
+      </div>
+      <div class="sub" style="margin-top:14px">
+        <h3>草案清单（逐条接受 / 撤销，版本留痕）</h3>
+        <div id="rot-drafts"></div>
+        <div id="rot-versions"></div>
       </div>
     </div>
   </section>
