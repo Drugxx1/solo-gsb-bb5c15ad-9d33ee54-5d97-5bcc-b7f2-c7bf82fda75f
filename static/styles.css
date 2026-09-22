@@ -130,6 +130,39 @@ canvas { width: 100%; display: block; }
 .move-c { color: var(--move); font-weight: 700; }
 .big-date { font-size: 17px; font-weight: 700; }
 .flag { display:inline-block; background:#fdecea; color:var(--bp); border-radius:4px; padding:0 6px; font-size:11px; margin-left:6px; }
+
+/* rotation scheduling */
+.rot-block { margin-top: 12px; }
+.chain {
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--bp);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin: 10px 0;
+  background: #fff;
+}
+.chain-head { font-weight: 700; margin-bottom: 6px; font-size: 13px; }
+.chain ul { margin: 0; padding-left: 18px; font-size: 12px; }
+.chain li { margin: 4px 0; }
+.draft-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.draft-table th, .draft-table td {
+  border-bottom: 1px solid var(--line);
+  padding: 5px 6px;
+  text-align: left;
+  vertical-align: top;
+}
+.draft-table th { background: #faf3e6; color: var(--muted); }
+.row-conflict td { background: #fdf4f1; }
+.status { padding: 1px 8px; border-radius: 10px; font-size: 11px; font-weight: 700; white-space: nowrap; }
+.st-pending { background: #fdf3e0; color: #8a6d1f; }
+.st-accepted { background: #e6f4ea; color: #1e6b3a; }
+.st-revoked { background: #efe9e6; color: #8a8177; text-decoration: line-through; }
+.ops button { padding: 2px 8px; font-size: 11px; margin: 1px 2px; }
+.ops button[data-draft-revoke] { background: #fff; color: var(--bp); border-color: var(--bp); }
+button[disabled] { opacity: .35; cursor: default; }
+.hist-row td { background: #fbf8f1; }
+.hist-list { margin: 4px 0; padding-left: 20px; }
+
 footer { text-align: center; color: var(--muted); font-size: 12px; padding: 18px; }
 .toast {
   position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);

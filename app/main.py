@@ -17,7 +17,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import audit, db, seed as seed_mod
+from . import audit, db, rotation, rotation_store, seed as seed_mod
 
 
 @asynccontextmanager
@@ -66,6 +66,30 @@ class SimulateIn(BaseModel):
     move_ts: Optional[str] = None
     annual_start: Optional[str] = None  # default: Jan 1 of the as_of year
     as_of: Optional[str] = None        # default: latest reading timestamp
+
+
+class RotationCapacityIn(BaseModel):
+    case_id: int
+    capacity: int = Field(ge=1, le=99)
+
+
+class RotationDraftIn(BaseModel):
+    exhibit_id: int
+    case_id: int
+    start_ts: str
+    end_ts: Optional[str] = None
+    note: str = ""
+
+
+class RotationBatchIn(BaseModel):
+    name: str = Field(default="", max_length=120)
+    note: str = ""
+    capacities: list[RotationCapacityIn] = Field(default_factory=list)
+    drafts: list[RotationDraftIn] = Field(min_length=1)
+
+
+class DraftActionIn(BaseModel):
+    note: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -592,6 +616,118 @@ def simulate_get(exhibit_id: int, target_case_id: int,
         _parse_ts_or_400(annual_start, "annual_start"),
         _parse_ts_or_400(as_of, "as_of"),
     )
+
+
+# ---------------------------------------------------------------------------
+# Rotation scheduling (batch drafts, conflict scan, accept/revoke versions)
+# ---------------------------------------------------------------------------
+
+def _rotation_analysis(conn, batch_id: int) -> dict:
+    batch = rotation_store.load_batch(conn, batch_id)
+    if batch is None:
+        raise HTTPException(404, f"rotation_batches id={batch_id} 不存在")
+    cap_rows = rotation_store.load_capacities(conn, batch_id)
+    drafts = rotation_store.load_drafts(conn, batch_id)
+    exhibit_ids = {d.exhibit_id for d in drafts}
+    limits = {
+        r["id"]: r["annual_limit_lux_hours"]
+        for r in conn.execute("SELECT id, annual_limit_lux_hours FROM exhibits")
+    }
+    committed = {eid: _load_occupancies(conn, eid) for eid in exhibit_ids}
+    series = _load_series(conn)
+
+    result = rotation.analyze(
+        drafts,
+        {r["case_id"]: r["capacity"] for r in cap_rows},
+        series, limits, committed,
+    )
+    result["batch"] = {
+        "id": batch["id"], "name": batch["name"],
+        "note": batch["note"], "created_at": batch["created_at"],
+    }
+    result["capacities"] = cap_rows
+    return result
+
+
+@app.post("/api/rotation/batches", status_code=201)
+def create_rotation_batch(body: RotationBatchIn):
+    """Submit one rotation batch: case capacities + any number of draft plans.
+
+    The batch is persisted (drafts start as ``pending`` with a ``submit``
+    version event) and the conflict/dose analysis is returned immediately.
+    """
+    parsed: list[tuple[RotationDraftIn, datetime, Optional[datetime]]] = []
+    for i, dr in enumerate(body.drafts, 1):
+        start = _parse_ts_or_400(dr.start_ts, f"drafts[{i}].start_ts")
+        end = _parse_ts_or_400(dr.end_ts, f"drafts[{i}].end_ts")
+        if start is None:
+            raise HTTPException(400, f"第 {i} 份草案缺少 start_ts")
+        if end and end <= start:
+            raise HTTPException(400, f"第 {i} 份草案 end_ts 必须晚于 start_ts")
+        parsed.append((dr, start, end))
+    seen_cap: set[int] = set()
+    for cap in body.capacities:
+        if cap.case_id in seen_cap:
+            raise HTTPException(400, f"展柜 id={cap.case_id} 的容量在同一批次中重复定义")
+        seen_cap.add(cap.case_id)
+
+    with db.get_conn() as conn:
+        for dr, _, _ in parsed:
+            _row_or_404(conn, "exhibits", dr.exhibit_id)
+            _row_or_404(conn, "cases", dr.case_id)
+        for cap in body.capacities:
+            _row_or_404(conn, "cases", cap.case_id)
+        batch_id = rotation_store.create_batch(
+            conn,
+            body.name,
+            body.note,
+            [(c.case_id, c.capacity) for c in body.capacities],
+            [(dr.exhibit_id, dr.case_id, start, end, dr.note)
+             for dr, start, end in parsed],
+        )
+        analysis = _rotation_analysis(conn, batch_id)
+    return {"id": batch_id, "analysis": analysis}
+
+
+@app.get("/api/rotation/batches")
+def list_rotation_batches():
+    with db.get_conn() as conn:
+        return rotation_store.list_batches(conn)
+
+
+@app.get("/api/rotation/batches/{batch_id}")
+def get_rotation_batch(batch_id: int):
+    with db.get_conn() as conn:
+        return _rotation_analysis(conn, batch_id)
+
+
+def _set_draft_status(draft_id: int, action: str, note: str) -> dict:
+    with db.get_conn() as conn:
+        try:
+            return rotation_store.set_draft_status(conn, draft_id, action, note)
+        except rotation_store.DraftNotFound as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except rotation_store.StatusConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/api/rotation/drafts/{draft_id}/accept")
+def accept_rotation_draft(draft_id: int, body: Optional[DraftActionIn] = None):
+    return _set_draft_status(draft_id, "accept", (body.note if body else "") or "接受草案")
+
+
+@app.post("/api/rotation/drafts/{draft_id}/revoke")
+def revoke_rotation_draft(draft_id: int, body: Optional[DraftActionIn] = None):
+    return _set_draft_status(draft_id, "revoke", (body.note if body else "") or "撤销草案")
+
+
+@app.get("/api/rotation/drafts/{draft_id}/history")
+def rotation_draft_history(draft_id: int):
+    with db.get_conn() as conn:
+        try:
+            return rotation_store.get_draft_history(conn, draft_id)
+        except rotation_store.DraftNotFound as exc:
+            raise HTTPException(404, str(exc)) from exc
 
 
 @app.post("/api/audit/export")
